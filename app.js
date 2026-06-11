@@ -688,23 +688,42 @@ function base64ToArrayBuffer(value) {
 }
 
 function buildInvoiceProducts(products) {
-  const quantities = new Map();
+  const productTotals = new Map();
   products.forEach((product) => {
     const key = normalizeProductKey(product.name);
-    quantities.set(key, (quantities.get(key) || 0) + Number(product.quantity || 0));
+    const quantity = normalizeNumber(product.quantity);
+    const price = normalizeNumber(product.price);
+    const net = normalizeNumber(product.net || quantity * price);
+    const vat = normalizeNumber(product.vat || net * VAT_RATE);
+    const gross = normalizeNumber(product.gross || net + vat);
+    const current = productTotals.get(key) || { quantity: 0, net: 0, vat: 0, gross: 0 };
+    current.quantity = normalizeNumber(current.quantity + quantity);
+    current.net = normalizeNumber(current.net + net);
+    current.vat = normalizeNumber(current.vat + vat);
+    current.gross = normalizeNumber(current.gross + gross);
+    productTotals.set(key, current);
   });
 
   return INVOICE_PRODUCTS.map((templateProduct) => {
-    const quantity = normalizeNumber(quantities.get(normalizeProductKey(templateProduct.name)) || 0);
-    const net = normalizeNumber(quantity * templateProduct.price);
-    const vat = normalizeNumber(net * VAT_RATE);
+    const total = productTotals.get(normalizeProductKey(templateProduct.name));
+    if (!total || !total.quantity) {
+      return {
+        name: templateProduct.name,
+        quantity: 0,
+        price: '',
+        net: 0,
+        vat: 0,
+        gross: 0,
+      };
+    }
+
     return {
       name: templateProduct.name,
-      quantity,
-      price: templateProduct.price,
-      net,
-      vat,
-      gross: normalizeNumber(net + vat),
+      quantity: total.quantity,
+      price: normalizeNumber(total.net / total.quantity),
+      net: total.net,
+      vat: total.vat,
+      gross: total.gross,
     };
   });
 }
@@ -942,7 +961,7 @@ function fillInvoiceSheetCopy(sheet, offset, store, invoiceNumber) {
     setSheetCell(sheet, `B${row}`, item.name);
     setSheetCell(sheet, `I${row}`, 'пачка');
     setSheetCell(sheet, `J${row}`, item.quantity ? normalizeNumber(item.quantity) : '');
-    setSheetCell(sheet, `M${row}`, normalizeNumber(item.price));
+    setSheetCell(sheet, `M${row}`, item.price === '' ? '' : normalizeNumber(item.price));
     setSheetCell(sheet, `N${row}`, normalizeNumber(item.net), `M${row}*J${row}`);
     setSheetCell(sheet, `Q${row}`, 12);
     setSheetCell(sheet, `R${row}`, normalizeNumber(item.vat), `N${row}*12/100`);
@@ -1202,7 +1221,7 @@ function fillInvoiceXmlCopy(documentXml, cellMap, offset, store, invoiceNumber) 
     setXmlCell(documentXml, cellMap, `B${row}`, item.name);
     setXmlCell(documentXml, cellMap, `I${row}`, 'пачка');
     setXmlCell(documentXml, cellMap, `J${row}`, item.quantity ? normalizeNumber(item.quantity) : '');
-    setXmlCell(documentXml, cellMap, `M${row}`, normalizeNumber(item.price));
+    setXmlCell(documentXml, cellMap, `M${row}`, item.price === '' ? '' : normalizeNumber(item.price));
     setXmlCell(documentXml, cellMap, `N${row}`, normalizeNumber(item.net), `M${row}*J${row}`);
     setXmlCell(documentXml, cellMap, `Q${row}`, 12);
     setXmlCell(documentXml, cellMap, `R${row}`, normalizeNumber(item.vat), `N${row}*12/100`);
