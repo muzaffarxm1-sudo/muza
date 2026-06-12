@@ -115,6 +115,8 @@ main { padding: 0 clamp(1rem, 4vw, 3rem) 3rem; }
 .store-grid { display: grid; gap: 1rem; }
 .store-card { overflow: hidden; }
 .store-head { display: flex; justify-content: space-between; gap: 1rem; padding: 1rem 1.2rem; background: #f8fafc; border-bottom: 1px solid var(--line); }
+.store-select { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: .7rem; cursor: pointer; }
+.store-select input { width: 1.15rem; height: 1.15rem; accent-color: var(--brand); }
 .store-head strong { font-size: 1.1rem; }
 .kpis { display: flex; gap: .7rem; flex-wrap: wrap; }
 .kpi { padding: .45rem .7rem; border-radius: 999px; background: white; color: #344054; border: 1px solid var(--line); font-weight: 700; }
