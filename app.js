@@ -46,6 +46,7 @@ const state = {
   rawRows: [],
   stores: [],
   warnings: [],
+  selectedStoreKeys: new Set(),
 };
 
 const els = {
@@ -60,6 +61,7 @@ const els = {
   loadSampleBtn: document.querySelector('#loadSampleBtn'),
   clearBtn: document.querySelector('#clearBtn'),
   exportCsvBtn: document.querySelector('#exportCsvBtn'),
+  exportSelectedExcelBtn: document.querySelector('#exportSelectedExcelBtn'),
   exportExcelBtn: document.querySelector('#exportExcelBtn'),
   exportInvoiceExcelBtn: document.querySelector('#exportInvoiceExcelBtn'),
   printBtn: document.querySelector('#printBtn'),
@@ -118,6 +120,7 @@ els.clearBtn.addEventListener('click', () => {
   state.rawRows = [];
   state.stores = [];
   state.warnings = [];
+  state.selectedStoreKeys.clear();
   els.fileInput.value = '';
   setStatus('Файл ещё не загружен.');
   els.summaryList.innerHTML = '';
@@ -128,8 +131,16 @@ els.clearBtn.addEventListener('click', () => {
 });
 
 els.exportCsvBtn.addEventListener('click', exportCsv);
+els.exportSelectedExcelBtn.addEventListener('click', exportSelectedQuantitiesExcel);
 els.exportExcelBtn.addEventListener('click', exportOrdersExcel);
 els.exportInvoiceExcelBtn.addEventListener('click', exportInvoiceTemplateExcel);
+els.resultsContent.addEventListener('change', (event) => {
+  if (!event.target.matches('.store-select input[type="checkbox"]')) return;
+  const key = event.target.dataset.storeKey;
+  if (!key) return;
+  if (event.target.checked) state.selectedStoreKeys.add(key);
+  else state.selectedStoreKeys.delete(key);
+});
 els.printBtn.addEventListener('click', () => {
   activateTab('invoice');
   window.print();
@@ -184,6 +195,7 @@ function processWorkbook(buffer, fileName) {
     state.rawRows = allRows;
     state.stores = parsed.stores;
     state.warnings = parsed.warnings;
+    state.selectedStoreKeys.clear();
 
     renderSummary();
     renderResults();
@@ -494,16 +506,26 @@ function renderResults() {
     return;
   }
 
+  const availableKeys = new Set(state.stores.map((store) => storeKey(store)));
+  state.selectedStoreKeys.forEach((key) => {
+    if (!availableKeys.has(key)) state.selectedStoreKeys.delete(key);
+  });
+
   els.resultsContent.className = 'store-grid';
   els.resultsContent.innerHTML = state.stores.map((store) => storeTable(store)).join('');
 }
 
 function storeTable(store) {
   const total = totals(store.products);
+  const key = storeKey(store);
+  const checked = state.selectedStoreKeys.has(key) ? 'checked' : '';
   return `
     <article class="store-card">
       <div class="store-head">
-        <div><strong>${escapeHtml(store.name)}</strong><br><span class="badge">${store.parts} блок(ов) объединено</span></div>
+        <label class="store-select">
+          <input type="checkbox" data-store-key="${escapeHtml(key)}" ${checked}>
+          <span><strong>${escapeHtml(store.name)}</strong><br><span class="badge">${store.parts} блок(ов) объединено</span></span>
+        </label>
         <div class="kpis">
           <span class="kpi">Товар: ${store.products.length}</span>
           <span class="kpi">НДС: ${formatMoney(total.vat)}</span>
@@ -518,6 +540,10 @@ function storeTable(store) {
         </table>
       </div>
     </article>`;
+}
+
+function storeKey(store) {
+  return normalizeText(store.name);
 }
 
 function renderInvoice() {
@@ -630,6 +656,40 @@ function exportOrdersExcel() {
     setStatus(`<b>${state.fileName}</b>: ${stores.length} магазинов выгружено в Excel.`);
   } catch (error) {
     showError(`Не удалось выгрузить накладные в Excel: ${error.message}`);
+  }
+}
+
+function exportSelectedQuantitiesExcel() {
+  if (!state.stores.length) {
+    showError('Сначала загрузите и разберите файл заказов.');
+    return;
+  }
+  if (!state.selectedStoreKeys.size) {
+    showError('Сначала отметьте магазины во вкладке результатов.');
+    return;
+  }
+  if (!window.XLSX) {
+    showError('Библиотека XLSX не загружена. Проверьте подключение к интернету.');
+    return;
+  }
+
+  try {
+    const selectedStores = rebuildStoresForCurrentGrouping()
+      .filter((store) => state.selectedStoreKeys.has(storeKey(store)));
+    if (!selectedStores.length) {
+      showError('Отмеченные магазины не найдены. Проверьте выбранные галочки.');
+      return;
+    }
+
+    const workbook = XLSX.utils.book_new();
+    const rows = buildSelectedQuantityRows(selectedStores);
+    const sheet = XLSX.utils.aoa_to_sheet(rows);
+    applySelectedQuantitySheetLayout(sheet, rows);
+    XLSX.utils.book_append_sheet(workbook, sheet, 'Танланган жами');
+    XLSX.writeFile(workbook, `tanlangan-jami-${Date.now()}.xlsx`);
+    setStatus(`${selectedStores.length} отмеченных магазинов выгружено в Excel без цен.`);
+  } catch (error) {
+    showError(`Не удалось выгрузить выбранные магазины в Excel: ${error.message}`);
   }
 }
 
@@ -1340,6 +1400,31 @@ function buildFlatExportRows() {
   return lines;
 }
 
+function buildSelectedQuantityRows(stores) {
+  const products = new Map();
+  stores.forEach((store) => {
+    store.products.forEach((item) => {
+      const key = normalizeText(item.name);
+      const current = products.get(key) || { name: item.name, quantity: 0 };
+      current.quantity = normalizeNumber(current.quantity + Number(item.quantity || 0));
+      products.set(key, current);
+    });
+  });
+
+  const productRows = Array.from(products.values())
+    .sort((left, right) => left.name.localeCompare(right.name, 'ru'))
+    .map((item, index) => [index + 1, item.name, normalizeNumber(item.quantity)]);
+  const totalQuantity = productRows.reduce((sum, row) => sum + Number(row[2] || 0), 0);
+
+  return [
+    ['Отмеченные магазины', stores.map((store) => store.name).join(', ')],
+    ['Количество магазинов', stores.length],
+    [],
+    ['№', 'Товар', 'Жами кол-во'],
+    ...productRows,
+    ['Итого', '', normalizeNumber(totalQuantity)],
+  ];
+}
 
 function buildOrdersSummaryRows(stores) {
   const rows = [['Магазин', 'Товар', 'Кол-во', 'Цена', 'Стоимость', 'НДС 12%', 'Стоимость с НДС']];
@@ -1378,6 +1463,40 @@ function buildStoreExportRows(store) {
     ]),
     ['Итого', '', normalizeNumber(total.quantity), '', roundMoney(total.net), roundMoney(total.vat), roundMoney(total.gross)],
   ];
+}
+
+function applySelectedQuantitySheetLayout(sheet, rows) {
+  const range = XLSX.utils.decode_range(sheet['!ref']);
+  sheet['!cols'] = [
+    { wch: 8 },
+    { wch: 64 },
+    { wch: 14 },
+  ];
+  sheet['!autofilter'] = { ref: `A4:C${Math.max(4, rows.length)}` };
+
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    for (let columnIndex = 0; columnIndex <= range.e.c; columnIndex += 1) {
+      const address = XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex });
+      const cell = sheet[address];
+      if (!cell) continue;
+      const isHeader = rowIndex === 0 || rowIndex === 1 || rowIndex === 3;
+      const isTotal = normalizeText(rows[rowIndex]?.[0]).includes('итого');
+      cell.s = {
+        font: { bold: isHeader || isTotal },
+        alignment: { vertical: 'center', wrapText: true },
+        border: {
+          top: { style: 'thin', color: { rgb: 'D9E2EF' } },
+          bottom: { style: 'thin', color: { rgb: 'D9E2EF' } },
+          left: { style: 'thin', color: { rgb: 'D9E2EF' } },
+          right: { style: 'thin', color: { rgb: 'D9E2EF' } },
+        },
+      };
+      if (isHeader || isTotal) {
+        cell.s.fill = { fgColor: { rgb: isTotal ? 'F8FAFC' : 'EAF2FF' } };
+      }
+      if (columnIndex === 2 && typeof cell.v === 'number') cell.z = '#,##0.00';
+    }
+  }
 }
 
 function applyOrdersSheetLayout(sheet, rows) {
