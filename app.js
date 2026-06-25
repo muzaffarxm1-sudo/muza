@@ -225,7 +225,10 @@ function parseRows(rows) {
       if (dataRow) {
         const storeName = cleanName(dataRow.row[shopHeader.nameIndex]);
         currentTotal = parseNumber(dataRow.row[shopHeader.totalIndex]);
-        if (storeName) currentStore = getStore(storeMap, storeName, currentTotal);
+        if (storeName) {
+          currentStore = getStore(storeMap, storeName, currentTotal);
+          addStoreOrderNumber(currentStore, findStoreOrderNumber(rows, rowIndex, dataRow.index));
+        }
       }
       productColumns = null;
       return;
@@ -318,9 +321,10 @@ function parseFlatTableRows(rows) {
     const gross = parseNumber(row[grossCol]) || net + vat;
     if (!quantity && !net && !gross) return;
 
-    const orderNumber = cleanName(row[orderCol]);
+    const orderNumber = normalizeOrderNumber(row[orderCol]);
     const declaredTotal = parseNumber(row[totalCol]);
     const store = getStore(storeMap, storeName, 0, false);
+    addStoreOrderNumber(store, orderNumber);
     const pairKey = `${normalizeText(storeName)}|${orderNumber || sourceRow}`;
     if (!orderStorePairs.has(pairKey)) {
       orderStorePairs.add(pairKey);
@@ -435,12 +439,46 @@ function isIgnoredProductName(name) {
 function getStore(storeMap, name, declaredTotal, incrementParts = true) {
   const key = normalizeText(name);
   if (!storeMap.has(key)) {
-    storeMap.set(key, { name, declaredTotal: 0, products: new Map(), parts: 0 });
+    storeMap.set(key, { name, declaredTotal: 0, products: new Map(), parts: 0, orderNumbers: [] });
   }
   const store = storeMap.get(key);
   if (incrementParts) store.parts += 1;
   store.declaredTotal += declaredTotal || 0;
   return store;
+}
+
+function addStoreOrderNumber(store, value) {
+  const orderNumber = normalizeOrderNumber(value);
+  if (!orderNumber) return;
+  store.orderNumbers = store.orderNumbers || [];
+  if (!store.orderNumbers.includes(orderNumber)) store.orderNumbers.push(orderNumber);
+}
+
+function normalizeOrderNumber(value) {
+  const raw = cleanName(value);
+  if (!raw) return '';
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length >= 10) return digits.slice(0, 10);
+  return raw;
+}
+
+function formatStoreOrderNumbers(store) {
+  return (store.orderNumbers || []).join(', ');
+}
+
+function findStoreOrderNumber(rows, headerIndex, dataIndex) {
+  const headerRow = rows[headerIndex] || [];
+  const parentRow = rows[Math.max(0, headerIndex - 1)] || [];
+  const parents = fillMergedParents(parentRow, headerRow.length);
+  const columns = headerRow.map((cell, columnIndex) => ({
+    index: columnIndex,
+    header: normalizeText(cell),
+    parent: normalizeText(parents[columnIndex]),
+  }));
+  const orderColumn = findColumn(columns, ({ header, parent }) => (
+    header === 'номер' && parent.includes('заказ')
+  ));
+  return orderColumn === -1 ? '' : normalizeOrderNumber((rows[dataIndex] || [])[orderColumn]);
 }
 
 function addProduct(store, product, groupByPrice) {
@@ -564,6 +602,7 @@ function rebuildStoresForCurrentGrouping() {
   const storeMap = new Map();
   state.stores.forEach((store) => {
     const target = getStore(storeMap, store.name, store.declaredTotal);
+    (store.orderNumbers || []).forEach((orderNumber) => addStoreOrderNumber(target, orderNumber));
     store.products.forEach((product) => addProduct(target, product, els.groupByPrice.checked));
   });
   return Array.from(storeMap.values()).map((store) => ({ ...store, products: Array.from(store.products.values()) }));
@@ -975,9 +1014,11 @@ function fillInvoiceSheetCopy(sheet, offset, store, invoiceNumber) {
   const invoiceNo = '';
 
   const monthText = formatRussianInvoiceMonth(date);
+  const orderNumberText = formatStoreOrderNumbers(store);
   setSheetCell(sheet, `A${titleRow}`, store.name);
   setSheetCell(sheet, `H${titleRow}`, `СЧЕТ-ФАКТУРА № ${invoiceNo}                         от           ${monthText}г.`);
   setSheetCell(sheet, `A${contractRow}`, '      к Договору № 15/365 от «28» ноября 2022г.');
+  if (orderNumberText) setSheetCell(sheet, `A${titleRow + 1}`, orderNumberText);
 
   setSheetCell(sheet, `A${infoStart}`, 'Поставщик:');
   setSheetCell(sheet, `C${infoStart}`, els.supplierName.value || SUPPLIER_DEFAULTS.name);
@@ -1235,9 +1276,11 @@ function fillInvoiceXmlCopy(documentXml, cellMap, offset, store, invoiceNumber) 
   const invoiceNo = '';
 
   const monthText = formatRussianInvoiceMonth(date);
+  const orderNumberText = formatStoreOrderNumbers(store);
   setXmlCell(documentXml, cellMap, `A${titleRow}`, store.name);
   setXmlCell(documentXml, cellMap, `H${titleRow}`, `СЧЕТ-ФАКТУРА № ${invoiceNo}                         от           ${monthText}г.`);
   setXmlCell(documentXml, cellMap, `A${contractRow}`, '      к Договору № 15/365 от «28» ноября 2022г.');
+  if (orderNumberText) setXmlCell(documentXml, cellMap, `A${titleRow + 1}`, orderNumberText);
 
   setXmlCell(documentXml, cellMap, `A${infoStart}`, 'Поставщик:');
   setXmlCell(documentXml, cellMap, `C${infoStart}`, els.supplierName.value || SUPPLIER_DEFAULTS.name);
@@ -1298,9 +1341,8 @@ function fillInvoiceXmlCopy(documentXml, cellMap, offset, store, invoiceNumber) 
 }
 
 function setXmlCell(documentXml, cellMap, address, value, formula = '') {
-  const cell = cellMap.get(address);
-  if (!cell) throw new Error(`В шаблоне отсутствует ячейка ${address}.`);
   const namespace = documentXml.documentElement.namespaceURI;
+  const cell = cellMap.get(address) || createXmlCell(documentXml, cellMap, address);
   Array.from(cell.children).forEach((child) => cell.removeChild(child));
   cell.removeAttribute('t');
 
@@ -1325,6 +1367,43 @@ function setXmlCell(documentXml, cellMap, address, value, formula = '') {
   text.textContent = String(value);
   inlineString.appendChild(text);
   cell.appendChild(inlineString);
+}
+
+function createXmlCell(documentXml, cellMap, address) {
+  const namespace = documentXml.documentElement.namespaceURI;
+  const [, column, rowText] = String(address).match(/^([A-Z]+)(\d+)$/) || [];
+  if (!column || !rowText) throw new Error(`Некорректный адрес ячейки ${address}.`);
+
+  const sheetData = documentXml.getElementsByTagNameNS(namespace, 'sheetData')[0];
+  const rowNumber = Number(rowText);
+  let row = Array.from(sheetData.children).find((item) => (
+    item.localName === 'row' && Number(item.getAttribute('r')) === rowNumber
+  ));
+
+  if (!row) {
+    row = documentXml.createElementNS(namespace, 'row');
+    row.setAttribute('r', String(rowNumber));
+    const nextRow = Array.from(sheetData.children).find((item) => (
+      item.localName === 'row' && Number(item.getAttribute('r')) > rowNumber
+    ));
+    if (nextRow) sheetData.insertBefore(row, nextRow);
+    else sheetData.appendChild(row);
+  }
+
+  const cell = documentXml.createElementNS(namespace, 'c');
+  cell.setAttribute('r', address);
+  const targetColumnIndex = columnToIndex(column);
+  const nextCell = Array.from(row.children).find((item) => (
+    item.localName === 'c' && columnToIndex(String(item.getAttribute('r')).replace(/\d+/g, '')) > targetColumnIndex
+  ));
+  if (nextCell) row.insertBefore(cell, nextCell);
+  else row.appendChild(cell);
+  cellMap.set(address, cell);
+  return cell;
+}
+
+function columnToIndex(column) {
+  return String(column).split('').reduce((sum, char) => (sum * 26) + char.charCodeAt(0) - 64, 0);
 }
 
 async function setWorkbookToFullCalculation(archive, parser, serializer) {
