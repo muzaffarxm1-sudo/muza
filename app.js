@@ -861,6 +861,7 @@ async function buildCombinedInvoicePackageWithZip(templateBuffer, stores) {
   const parser = new DOMParser();
   const serializer = new XMLSerializer();
   const worksheetXml = await sheetFile.async('string');
+  const sharedStrings = await loadArchiveSharedStrings(archive, parser);
   const templateSheetRelsFile = findArchiveFile(archive, 'xl/worksheets/_rels/sheet1.xml.rels');
   const templateSheetRelsXml = templateSheetRelsFile ? await templateSheetRelsFile.async('string') : '';
 
@@ -882,8 +883,8 @@ async function buildCombinedInvoicePackageWithZip(templateBuffer, stores) {
     const dimension = documentXml.getElementsByTagNameNS(namespace, 'dimension')[0];
     const cellMap = mapWorksheetCells(sheetData);
 
-    fillInvoiceXmlCopy(documentXml, cellMap, 0, store, storeIndex + 1);
-    fillInvoiceXmlCopy(documentXml, cellMap, 57, store, storeIndex + 1);
+    fillInvoiceXmlCopy(documentXml, cellMap, 0, store, storeIndex + 1, sharedStrings);
+    fillInvoiceXmlCopy(documentXml, cellMap, 57, store, storeIndex + 1, sharedStrings);
     if (dimension) dimension.setAttribute('ref', `A1:V${INVOICE_BLOCK_ROWS}`);
 
     const sheetNumber = storeIndex + 1;
@@ -1015,10 +1016,11 @@ function fillInvoiceSheetCopy(sheet, offset, store, invoiceNumber) {
 
   const monthText = formatRussianInvoiceMonth(date);
   const orderNumberText = formatStoreOrderNumbers(store);
+  const orderNumberAddress = findSheetCellAddressByText(sheet, offset, 'номер заказ');
   setSheetCell(sheet, `A${titleRow}`, store.name);
   setSheetCell(sheet, `H${titleRow}`, `СЧЕТ-ФАКТУРА № ${invoiceNo}                         от           ${monthText}г.`);
   setSheetCell(sheet, `A${contractRow}`, '      к Договору № 15/365 от «28» ноября 2022г.');
-  if (orderNumberText) setSheetCell(sheet, `A${titleRow + 1}`, orderNumberText);
+  if (orderNumberText && orderNumberAddress) setSheetCell(sheet, orderNumberAddress, orderNumberText);
 
   setSheetCell(sheet, `A${infoStart}`, 'Поставщик:');
   setSheetCell(sheet, `C${infoStart}`, els.supplierName.value || SUPPLIER_DEFAULTS.name);
@@ -1119,6 +1121,54 @@ function findArchiveFile(archive, path) {
     !archive.files[item].dir && item.replace(/\\/g, '/').toLowerCase().endsWith(normalized)
   ));
   return fileName ? archive.files[fileName] : null;
+}
+
+
+async function loadArchiveSharedStrings(archive, parser) {
+  const sharedStringsFile = findArchiveFile(archive, 'xl/sharedStrings.xml');
+  if (!sharedStringsFile) return [];
+  const sharedStringsXml = parser.parseFromString(await sharedStringsFile.async('string'), 'application/xml');
+  return Array.from(sharedStringsXml.getElementsByTagName('si')).map((item) => (
+    Array.from(item.getElementsByTagName('t')).map((text) => text.textContent || '').join('')
+  ));
+}
+
+function findSheetCellAddressByText(sheet, offset, needle) {
+  const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1:V113');
+  const normalizedNeedle = normalizeText(needle);
+  const startRow = offset;
+  const endRow = Math.min(range.e.r, offset + 8);
+  for (let row = startRow; row <= endRow; row += 1) {
+    for (let column = range.s.c; column <= range.e.c; column += 1) {
+      const address = XLSX.utils.encode_cell({ r: row, c: column });
+      const cell = sheet[address];
+      if (cell && normalizeText(cell.v) === normalizedNeedle) return address;
+    }
+  }
+  return '';
+}
+
+function findXmlCellAddressByText(cellMap, offset, needle, sharedStrings = []) {
+  const normalizedNeedle = normalizeText(needle);
+  for (const [address, cell] of cellMap.entries()) {
+    const row = Number(String(address).replace(/\D/g, ''));
+    if (row < offset + 1 || row > offset + 9) continue;
+    if (normalizeText(getXmlCellText(cell, sharedStrings)) === normalizedNeedle) return address;
+  }
+  return '';
+}
+
+function getXmlCellText(cell, sharedStrings = []) {
+  if (cell.getAttribute('t') === 's') {
+    const valueNode = Array.from(cell.children).find((child) => child.localName === 'v');
+    const index = valueNode ? Number(valueNode.textContent) : -1;
+    return sharedStrings[index] || '';
+  }
+  if (cell.getAttribute('t') === 'inlineStr') {
+    return Array.from(cell.getElementsByTagName('t')).map((item) => item.textContent || '').join('');
+  }
+  const valueNode = Array.from(cell.children).find((child) => child.localName === 'v');
+  return valueNode ? valueNode.textContent || '' : '';
 }
 
 function mapWorksheetCells(sheetData) {
@@ -1261,7 +1311,7 @@ function shiftFormulaRows(formula, rowOffset) {
   });
 }
 
-function fillInvoiceXmlCopy(documentXml, cellMap, offset, store, invoiceNumber) {
+function fillInvoiceXmlCopy(documentXml, cellMap, offset, store, invoiceNumber, sharedStrings = []) {
   const titleRow = 1 + offset;
   const contractRow = 2 + offset;
   const infoStart = 3 + offset;
@@ -1277,10 +1327,11 @@ function fillInvoiceXmlCopy(documentXml, cellMap, offset, store, invoiceNumber) 
 
   const monthText = formatRussianInvoiceMonth(date);
   const orderNumberText = formatStoreOrderNumbers(store);
+  const orderNumberAddress = findXmlCellAddressByText(cellMap, offset, 'номер заказ', sharedStrings);
   setXmlCell(documentXml, cellMap, `A${titleRow}`, store.name);
   setXmlCell(documentXml, cellMap, `H${titleRow}`, `СЧЕТ-ФАКТУРА № ${invoiceNo}                         от           ${monthText}г.`);
   setXmlCell(documentXml, cellMap, `A${contractRow}`, '      к Договору № 15/365 от «28» ноября 2022г.');
-  if (orderNumberText) setXmlCell(documentXml, cellMap, `A${titleRow + 1}`, orderNumberText);
+  if (orderNumberText && orderNumberAddress) setXmlCell(documentXml, cellMap, orderNumberAddress, orderNumberText);
 
   setXmlCell(documentXml, cellMap, `A${infoStart}`, 'Поставщик:');
   setXmlCell(documentXml, cellMap, `C${infoStart}`, els.supplierName.value || SUPPLIER_DEFAULTS.name);
