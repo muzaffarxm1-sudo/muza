@@ -64,6 +64,7 @@
         </div>
         <div class="button-row hide-print">
           <button id="exportCsvBtn" class="secondary" type="button">Скачать CSV</button>
+          <button id="exportSelectedExcelBtn" class="secondary" type="button">Танланганни Excelga</button>
           <button id="exportExcelBtn" type="button">Скачать накладные Excel</button>
         </div>
       </div>
@@ -78,7 +79,7 @@
             <input id="supplierName" type="text" value="&quot;NILPAK&quot; MCHJ QK">
           </label>
           <label>Номер документа
-            <input id="invoicePrefix" type="text" value="NK">
+            <input id="invoicePrefix" type="text" value="" placeholder="оставьте пустым">
           </label>
           <label>Дата
             <input id="invoiceDate" type="date">
@@ -92,7 +93,7 @@
             Объединять товары по названию и цене
           </label>
           <button type="button" id="buildInvoiceBtn">Обновить счёт-фактуру</button>
-          <button type="button" id="exportInvoiceExcelBtn" class="secondary">Выгрузить все магазины в один лист</button>
+          <button type="button" id="exportInvoiceExcelBtn" class="secondary">Выгрузить магазины по листам</button>
         </form>
         <div id="invoiceContent" class="invoice-preview empty-state">Сначала загрузите Excel-файл.</div>
       </div>

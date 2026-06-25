@@ -46,6 +46,7 @@ const state = {
   rawRows: [],
   stores: [],
   warnings: [],
+  selectedStoreKeys: new Set(),
 };
 
 const els = {
@@ -60,6 +61,7 @@ const els = {
   loadSampleBtn: document.querySelector('#loadSampleBtn'),
   clearBtn: document.querySelector('#clearBtn'),
   exportCsvBtn: document.querySelector('#exportCsvBtn'),
+  exportSelectedExcelBtn: document.querySelector('#exportSelectedExcelBtn'),
   exportExcelBtn: document.querySelector('#exportExcelBtn'),
   exportInvoiceExcelBtn: document.querySelector('#exportInvoiceExcelBtn'),
   printBtn: document.querySelector('#printBtn'),
@@ -118,6 +120,7 @@ els.clearBtn.addEventListener('click', () => {
   state.rawRows = [];
   state.stores = [];
   state.warnings = [];
+  state.selectedStoreKeys.clear();
   els.fileInput.value = '';
   setStatus('Файл ещё не загружен.');
   els.summaryList.innerHTML = '';
@@ -128,8 +131,16 @@ els.clearBtn.addEventListener('click', () => {
 });
 
 els.exportCsvBtn.addEventListener('click', exportCsv);
+els.exportSelectedExcelBtn.addEventListener('click', exportSelectedQuantitiesExcel);
 els.exportExcelBtn.addEventListener('click', exportOrdersExcel);
 els.exportInvoiceExcelBtn.addEventListener('click', exportInvoiceTemplateExcel);
+els.resultsContent.addEventListener('change', (event) => {
+  if (!event.target.matches('.store-select input[type="checkbox"]')) return;
+  const key = event.target.dataset.storeKey;
+  if (!key) return;
+  if (event.target.checked) state.selectedStoreKeys.add(key);
+  else state.selectedStoreKeys.delete(key);
+});
 els.printBtn.addEventListener('click', () => {
   activateTab('invoice');
   window.print();
@@ -184,6 +195,7 @@ function processWorkbook(buffer, fileName) {
     state.rawRows = allRows;
     state.stores = parsed.stores;
     state.warnings = parsed.warnings;
+    state.selectedStoreKeys.clear();
 
     renderSummary();
     renderResults();
@@ -213,7 +225,10 @@ function parseRows(rows) {
       if (dataRow) {
         const storeName = cleanName(dataRow.row[shopHeader.nameIndex]);
         currentTotal = parseNumber(dataRow.row[shopHeader.totalIndex]);
-        if (storeName) currentStore = getStore(storeMap, storeName, currentTotal);
+        if (storeName) {
+          currentStore = getStore(storeMap, storeName, currentTotal);
+          addStoreOrderNumber(currentStore, findStoreOrderNumber(rows, rowIndex, dataRow.index));
+        }
       }
       productColumns = null;
       return;
@@ -306,9 +321,10 @@ function parseFlatTableRows(rows) {
     const gross = parseNumber(row[grossCol]) || net + vat;
     if (!quantity && !net && !gross) return;
 
-    const orderNumber = cleanName(row[orderCol]);
+    const orderNumber = normalizeOrderNumber(row[orderCol]);
     const declaredTotal = parseNumber(row[totalCol]);
     const store = getStore(storeMap, storeName, 0, false);
+    addStoreOrderNumber(store, orderNumber);
     const pairKey = `${normalizeText(storeName)}|${orderNumber || sourceRow}`;
     if (!orderStorePairs.has(pairKey)) {
       orderStorePairs.add(pairKey);
@@ -423,12 +439,46 @@ function isIgnoredProductName(name) {
 function getStore(storeMap, name, declaredTotal, incrementParts = true) {
   const key = normalizeText(name);
   if (!storeMap.has(key)) {
-    storeMap.set(key, { name, declaredTotal: 0, products: new Map(), parts: 0 });
+    storeMap.set(key, { name, declaredTotal: 0, products: new Map(), parts: 0, orderNumbers: [] });
   }
   const store = storeMap.get(key);
   if (incrementParts) store.parts += 1;
   store.declaredTotal += declaredTotal || 0;
   return store;
+}
+
+function addStoreOrderNumber(store, value) {
+  const orderNumber = normalizeOrderNumber(value);
+  if (!orderNumber) return;
+  store.orderNumbers = store.orderNumbers || [];
+  if (!store.orderNumbers.includes(orderNumber)) store.orderNumbers.push(orderNumber);
+}
+
+function normalizeOrderNumber(value) {
+  const raw = cleanName(value);
+  if (!raw) return '';
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length >= 10) return digits.slice(0, 10);
+  return raw;
+}
+
+function formatStoreOrderNumbers(store) {
+  return (store.orderNumbers || []).join(', ');
+}
+
+function findStoreOrderNumber(rows, headerIndex, dataIndex) {
+  const headerRow = rows[headerIndex] || [];
+  const parentRow = rows[Math.max(0, headerIndex - 1)] || [];
+  const parents = fillMergedParents(parentRow, headerRow.length);
+  const columns = headerRow.map((cell, columnIndex) => ({
+    index: columnIndex,
+    header: normalizeText(cell),
+    parent: normalizeText(parents[columnIndex]),
+  }));
+  const orderColumn = findColumn(columns, ({ header, parent }) => (
+    header === 'номер' && parent.includes('заказ')
+  ));
+  return orderColumn === -1 ? '' : normalizeOrderNumber((rows[dataIndex] || [])[orderColumn]);
 }
 
 function addProduct(store, product, groupByPrice) {
@@ -494,16 +544,26 @@ function renderResults() {
     return;
   }
 
+  const availableKeys = new Set(state.stores.map((store) => storeKey(store)));
+  state.selectedStoreKeys.forEach((key) => {
+    if (!availableKeys.has(key)) state.selectedStoreKeys.delete(key);
+  });
+
   els.resultsContent.className = 'store-grid';
   els.resultsContent.innerHTML = state.stores.map((store) => storeTable(store)).join('');
 }
 
 function storeTable(store) {
   const total = totals(store.products);
+  const key = storeKey(store);
+  const checked = state.selectedStoreKeys.has(key) ? 'checked' : '';
   return `
     <article class="store-card">
       <div class="store-head">
-        <div><strong>${escapeHtml(store.name)}</strong><br><span class="badge">${store.parts} блок(ов) объединено</span></div>
+        <label class="store-select">
+          <input type="checkbox" data-store-key="${escapeHtml(key)}" ${checked}>
+          <span><strong>${escapeHtml(store.name)}</strong><br><span class="badge">${store.parts} блок(ов) объединено</span></span>
+        </label>
         <div class="kpis">
           <span class="kpi">Товар: ${store.products.length}</span>
           <span class="kpi">НДС: ${formatMoney(total.vat)}</span>
@@ -518,6 +578,10 @@ function storeTable(store) {
         </table>
       </div>
     </article>`;
+}
+
+function storeKey(store) {
+  return normalizeText(store.name);
 }
 
 function renderInvoice() {
@@ -538,6 +602,7 @@ function rebuildStoresForCurrentGrouping() {
   const storeMap = new Map();
   state.stores.forEach((store) => {
     const target = getStore(storeMap, store.name, store.declaredTotal);
+    (store.orderNumbers || []).forEach((orderNumber) => addStoreOrderNumber(target, orderNumber));
     store.products.forEach((product) => addProduct(target, product, els.groupByPrice.checked));
   });
   return Array.from(storeMap.values()).map((store) => ({ ...store, products: Array.from(store.products.values()) }));
@@ -550,7 +615,7 @@ function invoiceDocument(store, number) {
   return `
     <article class="invoice-document">
       <div class="invoice-title">
-        <h2>Счёт-фактура № ${escapeHtml(els.invoicePrefix.value || 'NK')}-${String(number).padStart(3, '0')}</h2>
+        <h2>Счёт-фактура №</h2>
         <p>${formatDate(date)}</p>
       </div>
       <div class="invoice-meta">
@@ -633,6 +698,40 @@ function exportOrdersExcel() {
   }
 }
 
+function exportSelectedQuantitiesExcel() {
+  if (!state.stores.length) {
+    showError('Сначала загрузите и разберите файл заказов.');
+    return;
+  }
+  if (!state.selectedStoreKeys.size) {
+    showError('Сначала отметьте магазины во вкладке результатов.');
+    return;
+  }
+  if (!window.XLSX) {
+    showError('Библиотека XLSX не загружена. Проверьте подключение к интернету.');
+    return;
+  }
+
+  try {
+    const selectedStores = rebuildStoresForCurrentGrouping()
+      .filter((store) => state.selectedStoreKeys.has(storeKey(store)));
+    if (!selectedStores.length) {
+      showError('Отмеченные магазины не найдены. Проверьте выбранные галочки.');
+      return;
+    }
+
+    const workbook = XLSX.utils.book_new();
+    const rows = buildSelectedQuantityRows(selectedStores);
+    const sheet = XLSX.utils.aoa_to_sheet(rows);
+    applySelectedQuantitySheetLayout(sheet, rows);
+    XLSX.utils.book_append_sheet(workbook, sheet, 'Танланган жами');
+    XLSX.writeFile(workbook, `tanlangan-jami-${Date.now()}.xlsx`);
+    setStatus(`${selectedStores.length} отмеченных магазинов выгружено в Excel без цен.`);
+  } catch (error) {
+    showError(`Не удалось выгрузить выбранные магазины в Excel: ${error.message}`);
+  }
+}
+
 async function exportInvoiceTemplateExcel() {
   if (!state.stores.length) {
     showError('Сначала загрузите и разберите файл заказов.');
@@ -646,7 +745,7 @@ async function exportInvoiceTemplateExcel() {
   buttons.forEach((button) => { button.disabled = true; });
 
   try {
-    setStatus('Шаблон загружается, все магазины собираются в один лист...');
+    setStatus('Шаблон загружается, магазины раскладываются по отдельным листам...');
     const templateBuffer = await loadInvoiceTemplateBuffer();
     const stores = rebuildStoresForCurrentGrouping().map((store) => ({
       ...store,
@@ -658,7 +757,7 @@ async function exportInvoiceTemplateExcel() {
       `schf-korzinka-${Date.now()}.xlsx`,
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     );
-    setStatus(`<b>${state.fileName}</b>: ${stores.length} магазинов выгружено в один лист Excel.`);
+    setStatus(`<b>${state.fileName}</b>: ${stores.length} магазинов выгружено по отдельным листам Excel.`);
   } catch (error) {
     showError(`Не удалось создать Excel по шаблону: ${error.message}`);
   } finally {
@@ -688,23 +787,42 @@ function base64ToArrayBuffer(value) {
 }
 
 function buildInvoiceProducts(products) {
-  const quantities = new Map();
+  const productTotals = new Map();
   products.forEach((product) => {
     const key = normalizeProductKey(product.name);
-    quantities.set(key, (quantities.get(key) || 0) + Number(product.quantity || 0));
+    const quantity = normalizeNumber(product.quantity);
+    const price = normalizeNumber(product.price);
+    const net = normalizeNumber(product.net || quantity * price);
+    const vat = normalizeNumber(product.vat || net * VAT_RATE);
+    const gross = normalizeNumber(product.gross || net + vat);
+    const current = productTotals.get(key) || { quantity: 0, net: 0, vat: 0, gross: 0 };
+    current.quantity = normalizeNumber(current.quantity + quantity);
+    current.net = normalizeNumber(current.net + net);
+    current.vat = normalizeNumber(current.vat + vat);
+    current.gross = normalizeNumber(current.gross + gross);
+    productTotals.set(key, current);
   });
 
   return INVOICE_PRODUCTS.map((templateProduct) => {
-    const quantity = normalizeNumber(quantities.get(normalizeProductKey(templateProduct.name)) || 0);
-    const net = normalizeNumber(quantity * templateProduct.price);
-    const vat = normalizeNumber(net * VAT_RATE);
+    const total = productTotals.get(normalizeProductKey(templateProduct.name));
+    if (!total || !total.quantity) {
+      return {
+        name: templateProduct.name,
+        quantity: 0,
+        price: '',
+        net: 0,
+        vat: 0,
+        gross: 0,
+      };
+    }
+
     return {
       name: templateProduct.name,
-      quantity,
-      price: templateProduct.price,
-      net,
-      vat,
-      gross: normalizeNumber(net + vat),
+      quantity: total.quantity,
+      price: normalizeNumber(total.net / total.quantity),
+      net: total.net,
+      vat: total.vat,
+      gross: total.gross,
     };
   });
 }
@@ -743,41 +861,47 @@ async function buildCombinedInvoicePackageWithZip(templateBuffer, stores) {
   const parser = new DOMParser();
   const serializer = new XMLSerializer();
   const worksheetXml = await sheetFile.async('string');
-  const documentXml = parser.parseFromString(worksheetXml, 'application/xml');
-  if (documentXml.getElementsByTagName('parsererror').length) {
-    throw new Error('Не удалось прочитать структуру листа шаблона.');
+  const sharedStrings = await loadArchiveSharedStrings(archive, parser);
+  const templateSheetRelsFile = findArchiveFile(archive, 'xl/worksheets/_rels/sheet1.xml.rels');
+  const templateSheetRelsXml = templateSheetRelsFile ? await templateSheetRelsFile.async('string') : '';
+
+  for (const fileName of Object.keys(archive.files)) {
+    const normalized = fileName.replace(/\\/g, '/').toLowerCase();
+    if (normalized.startsWith('xl/worksheets/sheet') || normalized.startsWith('xl/worksheets/_rels/sheet')) {
+      archive.remove(fileName);
+    }
   }
 
-  const namespace = documentXml.documentElement.namespaceURI;
-  const sheetData = documentXml.getElementsByTagNameNS(namespace, 'sheetData')[0];
-  const mergeCells = documentXml.getElementsByTagNameNS(namespace, 'mergeCells')[0];
-  const dimension = documentXml.getElementsByTagNameNS(namespace, 'dimension')[0];
-  const templateRows = Array.from(sheetData.children).map((row) => row.cloneNode(true));
-  const templateMerges = mergeCells
-    ? Array.from(mergeCells.children).map((merge) => merge.cloneNode(true))
-    : [];
-
-  sheetData.replaceChildren();
-  if (mergeCells) mergeCells.replaceChildren();
-
   stores.forEach((store, storeIndex) => {
-    const rowOffset = storeIndex * INVOICE_BLOCK_ROWS;
-    const cellMap = appendTemplateXmlBlock(documentXml, sheetData, templateRows, rowOffset);
-    appendTemplateXmlMerges(mergeCells, templateMerges, rowOffset);
-    fillInvoiceXmlCopy(documentXml, cellMap, rowOffset, store, storeIndex + 1);
-    fillInvoiceXmlCopy(documentXml, cellMap, rowOffset + 57, store, storeIndex + 1);
+    const documentXml = parser.parseFromString(worksheetXml, 'application/xml');
+    if (documentXml.getElementsByTagName('parsererror').length) {
+      throw new Error('Не удалось прочитать структуру листа шаблона.');
+    }
+
+    const namespace = documentXml.documentElement.namespaceURI;
+    const sheetData = documentXml.getElementsByTagNameNS(namespace, 'sheetData')[0];
+    const dimension = documentXml.getElementsByTagNameNS(namespace, 'dimension')[0];
+    const cellMap = mapWorksheetCells(sheetData);
+
+    fillInvoiceXmlCopy(documentXml, cellMap, 0, store, storeIndex + 1, sharedStrings);
+    fillInvoiceXmlCopy(documentXml, cellMap, 57, store, storeIndex + 1, sharedStrings);
+    if (dimension) dimension.setAttribute('ref', `A1:V${INVOICE_BLOCK_ROWS}`);
+
+    const sheetNumber = storeIndex + 1;
+    archive.file(`xl/worksheets/sheet${sheetNumber}.xml`, serializer.serializeToString(documentXml));
+    if (templateSheetRelsXml) {
+      archive.file(`xl/worksheets/_rels/sheet${sheetNumber}.xml.rels`, templateSheetRelsXml);
+    }
   });
 
-  if (mergeCells) mergeCells.setAttribute('count', String(templateMerges.length * stores.length));
-  dimension.setAttribute('ref', `A1:V${Math.max(1, stores.length * INVOICE_BLOCK_ROWS)}`);
-  const updatedWorksheetXml = serializer.serializeToString(documentXml);
-  archive.file(sheetFile.name, updatedWorksheetXml);
+  await updateWorkbookSheets(archive, parser, serializer, stores);
+  await updateWorkbookRelationships(archive, parser, serializer, stores.length);
+  await updateWorkbookContentTypes(archive, parser, serializer, stores.length);
   await setWorkbookToFullCalculation(archive, parser, serializer);
   await removeCalculationChain(archive, parser, serializer);
 
   return archive.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }
-
 
 function buildCombinedInvoicePackageWithXlsx(templateBuffer, stores) {
   const workbook = XLSX.read(templateBuffer, {
@@ -792,23 +916,24 @@ function buildCombinedInvoicePackageWithXlsx(templateBuffer, stores) {
   const templateSheet = workbook.Sheets[sheetName];
   if (!templateSheet) throw new Error('В шаблоне не найден первый лист.');
 
-  const outputSheet = cloneSheetMetadata(templateSheet);
   const templateRange = XLSX.utils.decode_range(templateSheet['!ref'] || `A1:V${INVOICE_BLOCK_ROWS}`);
   const templateMerges = (templateSheet['!merges'] || []).map((merge) => ({
     s: { ...merge.s },
     e: { ...merge.e },
   }));
+  workbook.SheetNames = [];
+  workbook.Sheets = {};
 
   stores.forEach((store, storeIndex) => {
-    const rowOffset = storeIndex * INVOICE_BLOCK_ROWS;
-    appendTemplateSheetBlock(templateSheet, outputSheet, templateRange, rowOffset);
-    appendTemplateSheetMerges(outputSheet, templateMerges, rowOffset);
-    fillInvoiceSheetCopy(outputSheet, rowOffset, store, storeIndex + 1);
-    fillInvoiceSheetCopy(outputSheet, rowOffset + 57, store, storeIndex + 1);
+    const outputSheet = cloneSheetMetadata(templateSheet);
+    appendTemplateSheetBlock(templateSheet, outputSheet, templateRange, 0);
+    appendTemplateSheetMerges(outputSheet, templateMerges, 0);
+    fillInvoiceSheetCopy(outputSheet, 0, store, storeIndex + 1);
+    fillInvoiceSheetCopy(outputSheet, 57, store, storeIndex + 1);
+    outputSheet['!ref'] = `A1:V${INVOICE_BLOCK_ROWS}`;
+    XLSX.utils.book_append_sheet(workbook, outputSheet, uniqueSheetName(workbook, safeSheetName(store.name)));
   });
 
-  outputSheet['!ref'] = `A1:V${Math.max(1, stores.length * INVOICE_BLOCK_ROWS)}`;
-  workbook.Sheets[sheetName] = outputSheet;
   workbook.Workbook = workbook.Workbook || {};
   workbook.Workbook.CalcPr = {
     ...(workbook.Workbook.CalcPr || {}),
@@ -887,12 +1012,15 @@ function fillInvoiceSheetCopy(sheet, offset, store, invoiceNumber) {
   const stampRow = 36 + offset;
   const total = totals(store.products);
   const date = els.invoiceDate.value || new Date().toISOString().slice(0, 10);
-  const invoiceNo = `${els.invoicePrefix.value || 'NK'}-${String(invoiceNumber).padStart(3, '0')}`;
+  const invoiceNo = '';
 
   const monthText = formatRussianInvoiceMonth(date);
+  const orderNumberText = formatStoreOrderNumbers(store);
+  const orderNumberAddress = findSheetCellAddressByText(sheet, offset, 'номер заказ');
   setSheetCell(sheet, `A${titleRow}`, store.name);
   setSheetCell(sheet, `H${titleRow}`, `СЧЕТ-ФАКТУРА № ${invoiceNo}                         от           ${monthText}г.`);
   setSheetCell(sheet, `A${contractRow}`, '      к Договору № 15/365 от «28» ноября 2022г.');
+  if (orderNumberText && orderNumberAddress) setSheetCell(sheet, orderNumberAddress, orderNumberText);
 
   setSheetCell(sheet, `A${infoStart}`, 'Поставщик:');
   setSheetCell(sheet, `C${infoStart}`, els.supplierName.value || SUPPLIER_DEFAULTS.name);
@@ -936,7 +1064,7 @@ function fillInvoiceSheetCopy(sheet, offset, store, invoiceNumber) {
     setSheetCell(sheet, `B${row}`, item.name);
     setSheetCell(sheet, `I${row}`, 'пачка');
     setSheetCell(sheet, `J${row}`, item.quantity ? normalizeNumber(item.quantity) : '');
-    setSheetCell(sheet, `M${row}`, normalizeNumber(item.price));
+    setSheetCell(sheet, `M${row}`, item.price === '' ? '' : normalizeNumber(item.price));
     setSheetCell(sheet, `N${row}`, normalizeNumber(item.net), `M${row}*J${row}`);
     setSheetCell(sheet, `Q${row}`, 12);
     setSheetCell(sheet, `R${row}`, normalizeNumber(item.vat), `N${row}*12/100`);
@@ -995,6 +1123,147 @@ function findArchiveFile(archive, path) {
   return fileName ? archive.files[fileName] : null;
 }
 
+
+async function loadArchiveSharedStrings(archive, parser) {
+  const sharedStringsFile = findArchiveFile(archive, 'xl/sharedStrings.xml');
+  if (!sharedStringsFile) return [];
+  const sharedStringsXml = parser.parseFromString(await sharedStringsFile.async('string'), 'application/xml');
+  return Array.from(sharedStringsXml.getElementsByTagName('si')).map((item) => (
+    Array.from(item.getElementsByTagName('t')).map((text) => text.textContent || '').join('')
+  ));
+}
+
+function findSheetCellAddressByText(sheet, offset, needle) {
+  const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1:V113');
+  const normalizedNeedle = normalizeText(needle);
+  const startRow = offset;
+  const endRow = Math.min(range.e.r, offset + 8);
+  for (let row = startRow; row <= endRow; row += 1) {
+    for (let column = range.s.c; column <= range.e.c; column += 1) {
+      const address = XLSX.utils.encode_cell({ r: row, c: column });
+      const cell = sheet[address];
+      if (cell && normalizeText(cell.v) === normalizedNeedle) return address;
+    }
+  }
+  return '';
+}
+
+function findXmlCellAddressByText(cellMap, offset, needle, sharedStrings = []) {
+  const normalizedNeedle = normalizeText(needle);
+  for (const [address, cell] of cellMap.entries()) {
+    const row = Number(String(address).replace(/\D/g, ''));
+    if (row < offset + 1 || row > offset + 9) continue;
+    if (normalizeText(getXmlCellText(cell, sharedStrings)) === normalizedNeedle) return address;
+  }
+  return '';
+}
+
+function getXmlCellText(cell, sharedStrings = []) {
+  if (cell.getAttribute('t') === 's') {
+    const valueNode = Array.from(cell.children).find((child) => child.localName === 'v');
+    const index = valueNode ? Number(valueNode.textContent) : -1;
+    return sharedStrings[index] || '';
+  }
+  if (cell.getAttribute('t') === 'inlineStr') {
+    return Array.from(cell.getElementsByTagName('t')).map((item) => item.textContent || '').join('');
+  }
+  const valueNode = Array.from(cell.children).find((child) => child.localName === 'v');
+  return valueNode ? valueNode.textContent || '' : '';
+}
+
+function mapWorksheetCells(sheetData) {
+  const cellMap = new Map();
+  Array.from(sheetData.children).forEach((row) => {
+    Array.from(row.children).forEach((cell) => {
+      if (cell.localName === 'c') cellMap.set(cell.getAttribute('r'), cell);
+    });
+  });
+  return cellMap;
+}
+
+async function updateWorkbookSheets(archive, parser, serializer, stores) {
+  const workbookFile = findArchiveFile(archive, 'xl/workbook.xml');
+  if (!workbookFile) throw new Error('В шаблоне не найден файл workbook.xml.');
+
+  const workbookXml = parser.parseFromString(await workbookFile.async('string'), 'application/xml');
+  const namespace = workbookXml.documentElement.namespaceURI;
+  const relationshipsNamespace = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const sheets = workbookXml.getElementsByTagNameNS(namespace, 'sheets')[0];
+  if (!sheets) throw new Error('В шаблоне не найден список листов.');
+
+  sheets.replaceChildren();
+  const usedNames = new Set();
+  stores.forEach((store, index) => {
+    const sheet = workbookXml.createElementNS(namespace, 'sheet');
+    const sheetName = uniqueXmlSheetName(usedNames, store.name || `Лист ${index + 1}`);
+    sheet.setAttribute('name', sheetName);
+    sheet.setAttribute('sheetId', String(index + 1));
+    sheet.setAttributeNS(relationshipsNamespace, 'r:id', `rIdSheet${index + 1}`);
+    sheets.appendChild(sheet);
+  });
+
+  archive.file(workbookFile.name, serializer.serializeToString(workbookXml));
+}
+
+async function updateWorkbookRelationships(archive, parser, serializer, sheetCount) {
+  const workbookRelsFile = findArchiveFile(archive, 'xl/_rels/workbook.xml.rels');
+  if (!workbookRelsFile) throw new Error('В шаблоне не найден файл workbook.xml.rels.');
+
+  const relsXml = parser.parseFromString(await workbookRelsFile.async('string'), 'application/xml');
+  const rels = relsXml.documentElement;
+  Array.from(rels.getElementsByTagName('Relationship')).forEach((relationship) => {
+    const type = relationship.getAttribute('Type') || '';
+    const target = relationship.getAttribute('Target') || '';
+    if (type.includes('/worksheet') || target.replace(/\\/g, '/').startsWith('worksheets/sheet')) {
+      rels.removeChild(relationship);
+    }
+  });
+
+  const namespace = rels.namespaceURI;
+  for (let index = 1; index <= sheetCount; index += 1) {
+    const relationship = relsXml.createElementNS(namespace, 'Relationship');
+    relationship.setAttribute('Id', `rIdSheet${index}`);
+    relationship.setAttribute('Type', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet');
+    relationship.setAttribute('Target', `worksheets/sheet${index}.xml`);
+    rels.appendChild(relationship);
+  }
+
+  archive.file(workbookRelsFile.name, serializer.serializeToString(relsXml));
+}
+
+async function updateWorkbookContentTypes(archive, parser, serializer, sheetCount) {
+  const contentTypesFile = findArchiveFile(archive, '[Content_Types].xml');
+  if (!contentTypesFile) throw new Error('В шаблоне не найден файл [Content_Types].xml.');
+
+  const contentTypesXml = parser.parseFromString(await contentTypesFile.async('string'), 'application/xml');
+  const types = contentTypesXml.documentElement;
+  Array.from(types.getElementsByTagName('Override')).forEach((override) => {
+    const partName = (override.getAttribute('PartName') || '').toLowerCase();
+    if (partName.startsWith('/xl/worksheets/sheet')) types.removeChild(override);
+  });
+
+  const namespace = types.namespaceURI;
+  for (let index = 1; index <= sheetCount; index += 1) {
+    const override = contentTypesXml.createElementNS(namespace, 'Override');
+    override.setAttribute('PartName', `/xl/worksheets/sheet${index}.xml`);
+    override.setAttribute('ContentType', 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml');
+    types.appendChild(override);
+  }
+
+  archive.file(contentTypesFile.name, serializer.serializeToString(contentTypesXml));
+}
+
+function uniqueXmlSheetName(usedNames, name) {
+  const baseName = safeSheetName(name);
+  let candidate = baseName;
+  for (let index = 2; usedNames.has(candidate.toLowerCase()); index += 1) {
+    const suffix = ` ${index}`;
+    candidate = safeSheetName(`${baseName.slice(0, 31 - suffix.length)}${suffix}`);
+  }
+  usedNames.add(candidate.toLowerCase());
+  return candidate;
+}
+
 function appendTemplateXmlBlock(documentXml, sheetData, templateRows, rowOffset) {
   const cellMap = new Map();
   templateRows.forEach((templateRow) => {
@@ -1042,7 +1311,7 @@ function shiftFormulaRows(formula, rowOffset) {
   });
 }
 
-function fillInvoiceXmlCopy(documentXml, cellMap, offset, store, invoiceNumber) {
+function fillInvoiceXmlCopy(documentXml, cellMap, offset, store, invoiceNumber, sharedStrings = []) {
   const titleRow = 1 + offset;
   const contractRow = 2 + offset;
   const infoStart = 3 + offset;
@@ -1054,12 +1323,15 @@ function fillInvoiceXmlCopy(documentXml, cellMap, offset, store, invoiceNumber) 
   const stampRow = 36 + offset;
   const total = totals(store.products);
   const date = els.invoiceDate.value || new Date().toISOString().slice(0, 10);
-  const invoiceNo = `${els.invoicePrefix.value || 'NK'}-${String(invoiceNumber).padStart(3, '0')}`;
+  const invoiceNo = '';
 
   const monthText = formatRussianInvoiceMonth(date);
+  const orderNumberText = formatStoreOrderNumbers(store);
+  const orderNumberAddress = findXmlCellAddressByText(cellMap, offset, 'номер заказ', sharedStrings);
   setXmlCell(documentXml, cellMap, `A${titleRow}`, store.name);
   setXmlCell(documentXml, cellMap, `H${titleRow}`, `СЧЕТ-ФАКТУРА № ${invoiceNo}                         от           ${monthText}г.`);
   setXmlCell(documentXml, cellMap, `A${contractRow}`, '      к Договору № 15/365 от «28» ноября 2022г.');
+  if (orderNumberText && orderNumberAddress) setXmlCell(documentXml, cellMap, orderNumberAddress, orderNumberText);
 
   setXmlCell(documentXml, cellMap, `A${infoStart}`, 'Поставщик:');
   setXmlCell(documentXml, cellMap, `C${infoStart}`, els.supplierName.value || SUPPLIER_DEFAULTS.name);
@@ -1103,7 +1375,7 @@ function fillInvoiceXmlCopy(documentXml, cellMap, offset, store, invoiceNumber) 
     setXmlCell(documentXml, cellMap, `B${row}`, item.name);
     setXmlCell(documentXml, cellMap, `I${row}`, 'пачка');
     setXmlCell(documentXml, cellMap, `J${row}`, item.quantity ? normalizeNumber(item.quantity) : '');
-    setXmlCell(documentXml, cellMap, `M${row}`, normalizeNumber(item.price));
+    setXmlCell(documentXml, cellMap, `M${row}`, item.price === '' ? '' : normalizeNumber(item.price));
     setXmlCell(documentXml, cellMap, `N${row}`, normalizeNumber(item.net), `M${row}*J${row}`);
     setXmlCell(documentXml, cellMap, `Q${row}`, 12);
     setXmlCell(documentXml, cellMap, `R${row}`, normalizeNumber(item.vat), `N${row}*12/100`);
@@ -1120,9 +1392,8 @@ function fillInvoiceXmlCopy(documentXml, cellMap, offset, store, invoiceNumber) 
 }
 
 function setXmlCell(documentXml, cellMap, address, value, formula = '') {
-  const cell = cellMap.get(address);
-  if (!cell) throw new Error(`В шаблоне отсутствует ячейка ${address}.`);
   const namespace = documentXml.documentElement.namespaceURI;
+  const cell = cellMap.get(address) || createXmlCell(documentXml, cellMap, address);
   Array.from(cell.children).forEach((child) => cell.removeChild(child));
   cell.removeAttribute('t');
 
@@ -1147,6 +1418,43 @@ function setXmlCell(documentXml, cellMap, address, value, formula = '') {
   text.textContent = String(value);
   inlineString.appendChild(text);
   cell.appendChild(inlineString);
+}
+
+function createXmlCell(documentXml, cellMap, address) {
+  const namespace = documentXml.documentElement.namespaceURI;
+  const [, column, rowText] = String(address).match(/^([A-Z]+)(\d+)$/) || [];
+  if (!column || !rowText) throw new Error(`Некорректный адрес ячейки ${address}.`);
+
+  const sheetData = documentXml.getElementsByTagNameNS(namespace, 'sheetData')[0];
+  const rowNumber = Number(rowText);
+  let row = Array.from(sheetData.children).find((item) => (
+    item.localName === 'row' && Number(item.getAttribute('r')) === rowNumber
+  ));
+
+  if (!row) {
+    row = documentXml.createElementNS(namespace, 'row');
+    row.setAttribute('r', String(rowNumber));
+    const nextRow = Array.from(sheetData.children).find((item) => (
+      item.localName === 'row' && Number(item.getAttribute('r')) > rowNumber
+    ));
+    if (nextRow) sheetData.insertBefore(row, nextRow);
+    else sheetData.appendChild(row);
+  }
+
+  const cell = documentXml.createElementNS(namespace, 'c');
+  cell.setAttribute('r', address);
+  const targetColumnIndex = columnToIndex(column);
+  const nextCell = Array.from(row.children).find((item) => (
+    item.localName === 'c' && columnToIndex(String(item.getAttribute('r')).replace(/\d+/g, '')) > targetColumnIndex
+  ));
+  if (nextCell) row.insertBefore(cell, nextCell);
+  else row.appendChild(cell);
+  cellMap.set(address, cell);
+  return cell;
+}
+
+function columnToIndex(column) {
+  return String(column).split('').reduce((sum, char) => (sum * 26) + char.charCodeAt(0) - 64, 0);
 }
 
 async function setWorkbookToFullCalculation(archive, parser, serializer) {
@@ -1222,6 +1530,31 @@ function buildFlatExportRows() {
   return lines;
 }
 
+function buildSelectedQuantityRows(stores) {
+  const products = new Map();
+  stores.forEach((store) => {
+    store.products.forEach((item) => {
+      const key = normalizeText(item.name);
+      const current = products.get(key) || { name: item.name, quantity: 0 };
+      current.quantity = normalizeNumber(current.quantity + Number(item.quantity || 0));
+      products.set(key, current);
+    });
+  });
+
+  const productRows = Array.from(products.values())
+    .sort((left, right) => left.name.localeCompare(right.name, 'ru'))
+    .map((item, index) => [index + 1, item.name, normalizeNumber(item.quantity)]);
+  const totalQuantity = productRows.reduce((sum, row) => sum + Number(row[2] || 0), 0);
+
+  return [
+    ['Отмеченные магазины', stores.map((store) => store.name).join(', ')],
+    ['Количество магазинов', stores.length],
+    [],
+    ['№', 'Товар', 'Жами кол-во'],
+    ...productRows,
+    ['Итого', '', normalizeNumber(totalQuantity)],
+  ];
+}
 
 function buildOrdersSummaryRows(stores) {
   const rows = [['Магазин', 'Товар', 'Кол-во', 'Цена', 'Стоимость', 'НДС 12%', 'Стоимость с НДС']];
@@ -1260,6 +1593,40 @@ function buildStoreExportRows(store) {
     ]),
     ['Итого', '', normalizeNumber(total.quantity), '', roundMoney(total.net), roundMoney(total.vat), roundMoney(total.gross)],
   ];
+}
+
+function applySelectedQuantitySheetLayout(sheet, rows) {
+  const range = XLSX.utils.decode_range(sheet['!ref']);
+  sheet['!cols'] = [
+    { wch: 8 },
+    { wch: 64 },
+    { wch: 14 },
+  ];
+  sheet['!autofilter'] = { ref: `A4:C${Math.max(4, rows.length)}` };
+
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    for (let columnIndex = 0; columnIndex <= range.e.c; columnIndex += 1) {
+      const address = XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex });
+      const cell = sheet[address];
+      if (!cell) continue;
+      const isHeader = rowIndex === 0 || rowIndex === 1 || rowIndex === 3;
+      const isTotal = normalizeText(rows[rowIndex]?.[0]).includes('итого');
+      cell.s = {
+        font: { bold: isHeader || isTotal },
+        alignment: { vertical: 'center', wrapText: true },
+        border: {
+          top: { style: 'thin', color: { rgb: 'D9E2EF' } },
+          bottom: { style: 'thin', color: { rgb: 'D9E2EF' } },
+          left: { style: 'thin', color: { rgb: 'D9E2EF' } },
+          right: { style: 'thin', color: { rgb: 'D9E2EF' } },
+        },
+      };
+      if (isHeader || isTotal) {
+        cell.s.fill = { fgColor: { rgb: isTotal ? 'F8FAFC' : 'EAF2FF' } };
+      }
+      if (columnIndex === 2 && typeof cell.v === 'number') cell.z = '#,##0.00';
+    }
+  }
 }
 
 function applyOrdersSheetLayout(sheet, rows) {
